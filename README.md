@@ -46,8 +46,16 @@ sudo would target root's session instead.
 Re-running is a no-op for anything already current. To undo it:
 
 ```bash
-cooler-lcd uninstall          # --keep-binary leaves the binary in place
+cooler-lcd uninstall          # asks before deleting your config, defaulting to no
 ```
+
+`uninstall` removes the udev rule, service and binary, then asks whether to
+delete `~/.config/cooler-lcd/config.toml`. Only real removals are reported; if
+nothing was installed it says `nothing to remove` rather than claiming success.
+
+The config prompt defaults to **keep**, so a reinstall keeps your settings.
+`--keep-config` skips the question and `--keep-binary` leaves the binary in
+place. When stdin is not a terminal the prompt is skipped and the config is kept.
 
 From a source checkout, `make install` builds and then runs the same self-install.
 

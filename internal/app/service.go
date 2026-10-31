@@ -105,25 +105,49 @@ func serviceStatus(cmd *cobra.Command) error {
 }
 
 func serviceAction(cmd *cobra.Command, action string) error {
+	out := cmd.OutOrStdout()
+
 	// Fail clearly when the unit is not installed: a restart would not help.
 	if action != "stop" && !unitInstalled() {
 		return fmt.Errorf("%w: run 'cooler-lcd install' first", errNotInstalled)
 	}
+
+	was := systemctlQuiet("is-active", serviceUnit)
+
+	switch action {
+	case "start":
+		// Report what happened, not what was asked for: starting an already
+		// running service is a no-op, and saying "started" would be a lie.
+		if was {
+			fmt.Fprintln(out, "already running")
+			return nil
+		}
+	case "stop":
+		if !was {
+			fmt.Fprintln(out, "already stopped")
+			return nil
+		}
+	}
+
 	c := exec.Command("systemctl", "--user", action, serviceUnit)
 	c.Stdout, c.Stderr = nil, os.Stderr
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("systemctl %s: %w", action, err)
 	}
-	// Report the resulting state rather than just exiting silently.
+
+	now := systemctlQuiet("is-active", serviceUnit)
 	switch action {
 	case "stop":
-		fmt.Fprintln(cmd.OutOrStdout(), "stopped")
-	default:
-		if systemctlQuiet("is-active", serviceUnit) {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s\n", actionVerb(action)+" (running)")
+		if now {
+			fmt.Fprintln(out, "stop requested, still running; check: cooler-lcd status")
 		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s, but the service is not running; check: cooler-lcd status\n",
-				actionVerb(action))
+			fmt.Fprintln(out, "stopped")
+		}
+	default:
+		if now {
+			fmt.Fprintln(out, actionVerb(action))
+		} else {
+			fmt.Fprintf(out, "%s, but it is not running; check: cooler-lcd status\n", actionVerb(action))
 		}
 	}
 	return nil

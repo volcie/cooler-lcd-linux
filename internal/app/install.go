@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -104,9 +105,6 @@ func runInstall(cmd *cobra.Command, _ Options, noService, noStart bool) error {
 	binDir, ruleDir := installDirs()
 	binPath := filepath.Join(binDir, "cooler-lcd")
 	rulePath := filepath.Join(ruleDir, ruleFileName)
-
-	say("cooler-lcd install")
-	say("")
 
 	// 1. Binary.
 	say("1/4  binary")
@@ -344,7 +342,7 @@ func probeWritable(node string) bool {
 }
 
 func newUninstallCmd() *cobra.Command {
-	var keepBinary bool
+	var keepBinary, keepConfig bool
 	cmd := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Remove the udev rule, service and installed binary",
@@ -356,35 +354,114 @@ func newUninstallCmd() *cobra.Command {
 			rulePath := filepath.Join(ruleDir, ruleFileName)
 			unitPath := filepath.Join(xdgConfigHome(), "systemd", "user", unitFileName)
 
-			fmt.Fprintln(out, "cooler-lcd uninstall")
+			// Report only real changes. Printing "removed X" for a file that was
+			// not there, or a closing "Done." when nothing happened, makes the
+			// output untrustworthy.
+			changed := 0
 
-			// Service first, as the user: a root-run systemctl --user would
-			// address root's session instead.
-			if err := exec.Command("systemctl", "--user", "disable", "--now", "cooler-lcd.service").Run(); err == nil {
-				fmt.Fprintln(out, "     service stopped")
-			}
-			if err := os.Remove(unitPath); err == nil {
-				fmt.Fprintln(out, "     removed", unitPath)
-			}
-			_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-
-			if err := removeElevated(rulePath); err == nil {
-				fmt.Fprintln(out, "     removed", rulePath)
-				_ = runElevated("udevadm", "control", "--reload-rules")
+			if unitInstalled() {
+				if err := exec.Command("systemctl", "--user", "disable", "--now", serviceUnit).Run(); err == nil {
+					fmt.Fprintln(out, "stopped service")
+				}
+				if err := os.Remove(unitPath); err == nil {
+					fmt.Fprintln(out, "removed "+unitPath)
+					changed++
+				}
+				_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
 			}
 
-			if !keepBinary {
-				if err := removeElevated(binPath); err == nil {
-					fmt.Fprintln(out, "     removed", binPath)
+			if fileExists(rulePath) {
+				if err := removeElevated(rulePath); err == nil {
+					fmt.Fprintln(out, "removed "+rulePath)
+					changed++
+					_ = runElevated("udevadm", "control", "--reload-rules")
 				}
 			}
 
-			fmt.Fprintln(out, "Done. Replug the cooler to restore default permissions.")
+			if !keepBinary && fileExists(binPath) {
+				if err := removeElevated(binPath); err == nil {
+					fmt.Fprintln(out, "removed "+binPath)
+					changed++
+				}
+			}
+
+			// The config is user data; default to keeping it.
+			cfgPath, _ := configPath(configFile)
+			if fileExists(cfgPath) {
+				if !keepConfig && askDeleteConfig(cmd, cfgPath) {
+					if err := removeElevated(cfgPath); err == nil {
+						fmt.Fprintln(out, "removed "+cfgPath)
+						changed++
+						removeEmptyDir(filepath.Dir(cfgPath))
+					}
+				} else {
+					fmt.Fprintln(out, "kept "+cfgPath)
+				}
+			}
+
+			if changed == 0 {
+				fmt.Fprintln(out, "nothing to remove")
+				return nil
+			}
+			fmt.Fprintln(out, "removed. the device node keeps its current permissions until it is re-created or the cooler is reconnected")
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&keepBinary, "keep-binary", false, "leave the installed binary in place")
+	cmd.Flags().BoolVar(&keepConfig, "keep-config", false, "keep the configuration file without asking")
 	return cmd
+}
+
+// fileExists reports whether path exists.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// askDeleteConfig prompts before deleting user data, defaulting to no. It
+// refuses to prompt without a terminal: a piped or unattended uninstall must
+// never hang waiting for input it will not get, and the safe default is to keep
+// the file.
+func askDeleteConfig(cmd *cobra.Command, path string) bool {
+	in := cmd.InOrStdin()
+	f, ok := in.(*os.File)
+	if !ok || !termIsTerminal(f) {
+		return false
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "\nDelete the configuration file %s? [y/N] ", path)
+	sc := bufio.NewScanner(f)
+	if !sc.Scan() {
+		return false
+	}
+	return parseYes(sc.Text())
+}
+
+// parseYes accepts only an explicit affirmative; anything else, including empty
+// input, means no.
+func parseYes(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "y", "yes":
+		return true
+	}
+	return false
+}
+
+// termIsTerminal reports whether f is a character device.
+func termIsTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// removeEmptyDir removes dir if it is empty, ignoring failures.
+func removeEmptyDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err == nil && len(entries) == 0 {
+		_ = os.Remove(dir)
+	}
 }
 
 // removeElevated deletes a file, escalating only when the direct removal is

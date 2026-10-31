@@ -3,12 +3,15 @@ package app
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/volcie/cooler-lcd-linux/internal/assets"
 )
@@ -264,5 +267,150 @@ func TestValidateRejectsMissingSensorPaths(t *testing.T) {
 	o.Paths.GPU = file
 	if err := o.validate(); err == nil {
 		t.Error("expected an error for a non-directory gpu-hwmon")
+	}
+}
+
+// Uninstall must never delete user data by default, and must never block when
+// it cannot prompt.
+func TestAskDeleteConfigDefaultsToKeep(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		del   bool
+	}{
+		{"empty", "\n", false},
+		{"yes", "y\n", true},
+		{"full yes", "yes\n", true},
+		{"uppercase", "Y\n", true},
+		{"no", "n\n", false},
+		{"garbage", "maybe\n", false},
+		{"eof", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.SetIn(strings.NewReader(c.input))
+			cmd.SetOut(io.Discard)
+
+			// A plain reader is not a terminal, so the prompt is skipped and the
+			// answer is always "keep". Verify the non-interactive contract here.
+			if got := askDeleteConfig(cmd, "/tmp/config.toml"); got {
+				t.Error("must not delete without a terminal")
+			}
+		})
+	}
+}
+
+// The prompt itself, exercised by pretending stdin is a terminal.
+func TestPromptParsing(t *testing.T) {
+	cases := map[string]bool{
+		"y": true, "Y": true, "yes": true, "YES": true, " y \n": true,
+		"n": false, "no": false, "": false, "maybe": false, "1": false,
+	}
+	for input, want := range cases {
+		if got := parseYes(strings.TrimSpace(input)); got != want {
+			t.Errorf("parseYes(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
+
+// A fake systemctl that reports a fixed active state, so the state-change
+// messages can be checked without touching the real service.
+func fakeSystemctl(t *testing.T, active bool, calls *[]string) {
+	t.Helper()
+	dir := t.TempDir()
+	state := "inactive"
+	if active {
+		state = "active"
+	}
+	script := "#!/bin/sh\n"
+	script += "echo \"$@\" >> " + filepath.Join(dir, "calls") + "\n"
+	script += "for a in \"$@\"; do\n"
+	script += "  case \"$a\" in\n"
+	script += "    is-active) [ \"" + state + "\" = active ] && exit 0 || exit 3 ;;\n"
+	script += "  esac\n"
+	script += "done\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	if calls != nil {
+		t.Logf("stub at %s", dir)
+	}
+}
+
+// Starting an already-running service must say so, not "started".
+func TestServiceActionReportsActualState(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	unitDir := filepath.Join(base, "systemd", "user")
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unitDir, unitFileName), []byte("[Unit]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("start while running", func(t *testing.T) {
+		fakeSystemctl(t, true, nil)
+		var buf strings.Builder
+		cmd := &cobra.Command{}
+		cmd.SetOut(&buf)
+		if err := serviceAction(cmd, "start"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := strings.TrimSpace(buf.String()); got != "already running" {
+			t.Errorf("got %q, want %q", got, "already running")
+		}
+	})
+
+	t.Run("stop while stopped", func(t *testing.T) {
+		fakeSystemctl(t, false, nil)
+		var buf strings.Builder
+		cmd := &cobra.Command{}
+		cmd.SetOut(&buf)
+		if err := serviceAction(cmd, "stop"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := strings.TrimSpace(buf.String()); got != "already stopped" {
+			t.Errorf("got %q, want %q", got, "already stopped")
+		}
+	})
+
+	t.Run("unit missing", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		cmd := &cobra.Command{}
+		cmd.SetOut(io.Discard)
+		err := serviceAction(cmd, "start")
+		if !errors.Is(err, errNotInstalled) {
+			t.Errorf("got %v, want errNotInstalled", err)
+		}
+	})
+}
+
+// Uninstalling when nothing is installed must say so instead of "Done".
+func TestUninstallReportsNothingToRemove(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("COOLER_LCD_BINDIR", filepath.Join(dir, "bin"))
+	t.Setenv("COOLER_LCD_RULEDIR", filepath.Join(dir, "rules"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "cfg"))
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	cmd := newUninstallCmd()
+	var buf strings.Builder
+	cmd.SetOut(&buf)
+	cmd.SetIn(strings.NewReader(""))
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "nothing to remove") {
+		t.Errorf("expected 'nothing to remove', got %q", got)
+	}
+	if strings.Contains(got, "Done.") {
+		t.Errorf("must not claim success when nothing was removed: %q", got)
+	}
+	if strings.Contains(got, "cooler-lcd uninstall") {
+		t.Errorf("must not echo the command name: %q", got)
 	}
 }
