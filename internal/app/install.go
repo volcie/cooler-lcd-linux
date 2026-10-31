@@ -21,15 +21,16 @@ import (
 const (
 	defaultBinDir  = "/usr/local/bin"
 	defaultRuleDir = "/etc/udev/rules.d"
+	defaultUnitDir = "/etc/systemd/system"
 	ruleFileName   = "70-cooler-lcd.rules"
 	unitFileName   = "cooler-lcd.service"
 )
 
 // installDirs resolves the destinations, honouring overrides.
-func installDirs() (binDir, ruleDir string) {
-	binDir = envOr("COOLER_LCD_BINDIR", defaultBinDir)
-	ruleDir = envOr("COOLER_LCD_RULEDIR", defaultRuleDir)
-	return binDir, ruleDir
+func installDirs() (binDir, ruleDir, unitDir string) {
+	return envOr("COOLER_LCD_BINDIR", defaultBinDir),
+		envOr("COOLER_LCD_RULEDIR", defaultRuleDir),
+		envOr("COOLER_LCD_UNITDIR", defaultUnitDir)
 }
 
 func envOr(key, fallback string) string {
@@ -39,28 +40,29 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// primaryGroup returns the user's primary group name. Using it rather than a
-// fixed "users" makes the udev rule work regardless of distro group layout.
-func primaryGroup() (string, error) {
-	out, err := exec.Command("id", "-gn").Output()
-	if err != nil {
-		return "", fmt.Errorf("detect primary group: %w", err)
+// ensureServiceGroup creates the dedicated group that owns the panel device.
+//
+// A fixed group is required rather than a login user's: the service runs with
+// DynamicUser=yes, so it has no home and no primary group of its own, and the
+// udev rule cannot point at whichever user happens to be logged in. Running
+// the old code under sudo also detected "root" as the group, which would have
+// left the unprivileged service unable to open the device.
+func ensureServiceGroup(name string) error {
+	if exec.Command("getent", "group", name).Run() == nil {
+		return nil
 	}
-	g := strings.TrimSpace(string(out))
-	if g == "" {
-		return "", errors.New("empty primary group")
-	}
-	return g, nil
+	return runElevated("groupadd", "--system", name)
 }
 
-// renderRule substitutes the group into the embedded udev rule.
+// renderRule substitutes the service group into the embedded udev rule.
 func renderRule(group string) string {
-	return strings.Replace(assets.UdevRule, assets.GroupToken, fmt.Sprintf(`GROUP=%q`, group), 1)
+	return strings.ReplaceAll(assets.UdevRule, assets.GroupToken, group)
 }
 
-// renderUnit substitutes the binary path into the embedded unit.
-func renderUnit(binPath string) string {
-	return strings.ReplaceAll(assets.ServiceUnit, assets.BinToken, binPath)
+// renderUnit substitutes the binary path and group into the embedded unit.
+func renderUnit(binPath, group string) string {
+	s := strings.ReplaceAll(assets.ServiceUnit, assets.BinToken, binPath)
+	return strings.ReplaceAll(s, assets.GroupToken, group)
 }
 
 func newInstallCmd(opts *Options) *cobra.Command {
@@ -102,9 +104,12 @@ func runInstall(cmd *cobra.Command, _ Options, noService, noStart bool) error {
 		return fmt.Errorf("resolve own binary: %w", err)
 	}
 
-	binDir, ruleDir := installDirs()
+	binDir, ruleDir, unitDir := installDirs()
 	binPath := filepath.Join(binDir, "cooler-lcd")
 	rulePath := filepath.Join(ruleDir, ruleFileName)
+	unitPath := filepath.Join(unitDir, unitFileName)
+	group := assets.ServiceGroup
+	cfgPath := envOr("COOLER_LCD_CONFIG", assets.SystemConfigPath)
 
 	// 1. Binary.
 	say("1/4  binary")
@@ -118,24 +123,19 @@ func runInstall(cmd *cobra.Command, _ Options, noService, noStart bool) error {
 		say("     %s already current", binPath)
 	}
 
-	// 2. Udev rule.
+	// 2. Group and udev rule. The service runs with DynamicUser=yes, which has
+	// no home and no primary group, so the device is granted to a dedicated
+	// system group rather than a login user's group.
 	say("2/4  device access")
-	group, err := primaryGroup()
-	if err != nil {
-		return err
+	if err := ensureServiceGroup(group); err != nil {
+		return fmt.Errorf("create group %s: %w", group, err)
 	}
-	rulePath2 := rulePath
 	say("     group: %s", group)
 
-	changed, err := writeIfChanged(rulePath, renderRule(group), 0o644)
-	if err != nil {
+	if changed, err := writeIfChanged(rulePath, renderRule(group), 0o644); err != nil {
 		return fmt.Errorf("install udev rule: %w", err)
-	}
-	if changed {
-		say("     installed %s", rulePath2)
-		// The rule is on disk at this point, so a failure to reload is a
-		// warning rather than a fatal error: the user can reload later and the
-		// rest of the install is still valid.
+	} else if changed {
+		say("     installed %s", rulePath)
 		if err := runElevated("udevadm", "control", "--reload-rules"); err != nil {
 			warn(out, "could not reload udev rules: %v", err)
 			warn(out, "run later: sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw")
@@ -146,102 +146,66 @@ func runInstall(cmd *cobra.Command, _ Options, noService, noStart bool) error {
 		say("     rule already current")
 	}
 
-	// 3. User service. This must run as the invoking user: a root-run
-	// "systemctl --user" would target root's session, not yours.
-	say("3/4  user service")
+	// 3. System service.
+	say("3/4  service")
 	if noService {
 		say("     skipped (--no-service)")
-	} else if err := installService(binPath, noStart); err != nil {
+	} else if err := installService(unitPath, binPath, group, noStart); err != nil {
 		return fmt.Errorf("install service: %w", err)
 	} else if noStart {
 		say("     installed, not started (--no-start)")
+	} else if systemctlQuiet("is-active", serviceUnit) {
+		say("     installed and running")
 	} else {
-		say("     enabled and started")
+		say("     installed but not running; check: cooler-lcd status")
 	}
 
-	// 4. Report.
-	say("4/4  status")
-	havePanel := false
-	if devices, err := panel.Enumerate(); err == nil && len(devices) > 0 {
-		havePanel = true
-		say("     found %s", devices[0].Path)
-		if !probeWritable(devices[0].Path) {
-			say("")
-			say("     NOTE: %s is not writable yet.", devices[0].Path)
-			say("     Unplug and replug the cooler's USB header.")
+	// 4. Config.
+	say("4/4  config")
+	if fileExists(cfgPath) {
+		say("     %s already present", cfgPath)
+	} else {
+		if _, err := writeIfChanged(cfgPath, defaultConfigTemplate, 0o644); err != nil {
+			return fmt.Errorf("write config: %w", err)
 		}
-	} else {
-		say("     no 5131:2007 device detected yet")
+		say("     wrote %s (defaults)", cfgPath)
 	}
 
-	// Only point at manual commands when the service is not already doing the
-	// job; telling someone to run the streamer right after starting it is
-	// misleading.
-	switch {
-	case noService:
-		say("")
+	say("")
+	if noService {
 		say("The service was skipped, so nothing is driving the panel.")
-		say("  cooler-lcd                 stream to the panel (Ctrl-C blanks it)")
-		say("  cooler-lcd install         install the service instead")
-	case noStart:
-		say("")
-		say("Service installed but not started.")
-		say("  cooler-lcd start")
-	case havePanel:
-		say("")
-		say("The service is running and driving the panel now.")
-		say("  journalctl --user -u cooler-lcd -f    watch it")
-		say("  cooler-lcd print                      check the sensor mapping")
-	default:
-		say("")
-		say("The service is waiting for the panel; it starts as soon as the")
-		say("cooler is plugged in. No further action needed.")
+		say("  cooler-lcd             stream in the foreground")
+		say("  cooler-lcd install     install the service instead")
+	} else if noStart {
+		say("Start it with: cooler-lcd start")
+	} else {
+		say("Logs:    journalctl -u cooler-lcd -f")
+		say("Config:  %s", cfgPath)
+		say("Sensors: cooler-lcd print")
 	}
 	return nil
 }
 
-// installService writes and enables the systemd user unit. It never runs as
-// root: the caller is the user whose session owns the unit.
-func installService(binPath string, noStart bool) error {
-	unitDir := filepath.Join(xdgConfigHome(), "systemd", "user")
-	unitPath := filepath.Join(unitDir, unitFileName)
-
-	if err := os.MkdirAll(unitDir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", unitDir, err)
-	}
-	if _, err := writeIfChanged(unitPath, renderUnit(binPath), 0o644); err != nil {
+// installService writes and enables the system unit. It runs as root, so there
+// is no "systemctl --user": the unit belongs to the machine, not a session.
+func installService(unitPath, binPath, group string, noStart bool) error {
+	if _, err := writeIfChanged(unitPath, renderUnit(binPath, group), 0o644); err != nil {
 		return fmt.Errorf("write unit: %w", err)
 	}
-	if err := exec.Command("systemctl", "--user", "daemon-reload").Run(); err != nil {
+	if err := runElevated("systemctl", "daemon-reload"); err != nil {
 		return fmt.Errorf("daemon-reload: %w", err)
 	}
-
-	if err := exec.Command("systemctl", "--user", "enable", "cooler-lcd.service").Run(); err != nil {
-		return fmt.Errorf("systemctl enable: %w", err)
+	if err := runElevated("systemctl", "enable", serviceUnit); err != nil {
+		return fmt.Errorf("enable: %w", err)
 	}
 	if noStart {
 		return nil
 	}
-	// "enable --now" restarts an already-running unit. Start only when it is
-	// not already active, so re-running install does not interrupt the panel.
-	if exec.Command("systemctl", "--user", "is-active", "--quiet", "cooler-lcd.service").Run() == nil {
+	// enable --now would restart a running unit; start only if inactive.
+	if systemctlQuiet("is-active", serviceUnit) {
 		return nil
 	}
-	if err := exec.Command("systemctl", "--user", "start", "cooler-lcd.service").Run(); err != nil {
-		return fmt.Errorf("systemctl start: %w", err)
-	}
-	return nil
-}
-
-func xdgConfigHome() string {
-	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
-		return v
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "."
-	}
-	return filepath.Join(home, ".config")
+	return runElevated("systemctl", "start", serviceUnit)
 }
 
 // writeIfChanged writes content unless the destination already matches. It
@@ -349,10 +313,10 @@ func newUninstallCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
-			binDir, ruleDir := installDirs()
+			binDir, ruleDir, unitDir := installDirs()
 			binPath := filepath.Join(binDir, "cooler-lcd")
 			rulePath := filepath.Join(ruleDir, ruleFileName)
-			unitPath := filepath.Join(xdgConfigHome(), "systemd", "user", unitFileName)
+			unitPath := filepath.Join(unitDir, unitFileName)
 
 			// Report only real changes. Printing "removed X" for a file that was
 			// not there, or a closing "Done." when nothing happened, makes the
@@ -360,14 +324,14 @@ func newUninstallCmd() *cobra.Command {
 			changed := 0
 
 			if unitInstalled() {
-				if err := exec.Command("systemctl", "--user", "disable", "--now", serviceUnit).Run(); err == nil {
+				if err := runElevated("systemctl", "disable", "--now", serviceUnit); err == nil {
 					fmt.Fprintln(out, "stopped service")
 				}
 				if err := os.Remove(unitPath); err == nil {
 					fmt.Fprintln(out, "removed "+unitPath)
 					changed++
 				}
-				_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+				_ = runElevated("systemctl", "daemon-reload")
 			}
 
 			if fileExists(rulePath) {
@@ -386,7 +350,10 @@ func newUninstallCmd() *cobra.Command {
 			}
 
 			// The config is user data; default to keeping it.
-			cfgPath, _ := configPath(configFile)
+			cfgPath := envOr("COOLER_LCD_CONFIG", assets.SystemConfigPath)
+			if configFile != "" {
+				cfgPath = configFile
+			}
 			if fileExists(cfgPath) {
 				if !keepConfig && askDeleteConfig(cmd, cfgPath) {
 					if err := removeElevated(cfgPath); err == nil {

@@ -19,12 +19,12 @@ import (
 // The embedded rule must carry the group placeholder the renderer replaces.
 // If someone edits the rule's GROUP=, install silently writes the wrong group.
 func TestRenderRuleSubstitutesGroup(t *testing.T) {
-	got := renderRule("volcie")
+	got := renderRule("cooler-lcd")
 
 	if strings.Contains(got, assets.GroupToken) {
 		t.Errorf("placeholder %s still present", assets.GroupToken)
 	}
-	if !strings.Contains(got, `GROUP="volcie"`) {
+	if !strings.Contains(got, `GROUP="cooler-lcd"`) {
 		t.Errorf("rendered rule missing the group:\n%s", got)
 	}
 	// Everything else must survive verbatim.
@@ -38,7 +38,7 @@ func TestRenderRuleSubstitutesGroup(t *testing.T) {
 }
 
 func TestRenderUnitSubstitutesBinary(t *testing.T) {
-	got := renderUnit("/usr/local/bin/cooler-lcd")
+	got := renderUnit("/usr/local/bin/cooler-lcd", assets.ServiceGroup)
 
 	if strings.Contains(got, assets.BinToken) {
 		t.Errorf("placeholder %s still present", assets.BinToken)
@@ -46,8 +46,14 @@ func TestRenderUnitSubstitutesBinary(t *testing.T) {
 	if !strings.Contains(got, "ExecStart=/usr/local/bin/cooler-lcd") {
 		t.Errorf("rendered unit missing ExecStart:\n%s", got)
 	}
-	if !strings.Contains(got, "WantedBy=default.target") {
+	if !strings.Contains(got, "WantedBy=multi-user.target") {
 		t.Error("rendered unit lost the install target")
+	}
+	if !strings.Contains(got, "SupplementaryGroups=cooler-lcd") {
+		t.Error("rendered unit lost the group")
+	}
+	if !strings.Contains(got, "DynamicUser=yes") {
+		t.Error("rendered unit must run unprivileged")
 	}
 }
 
@@ -92,10 +98,14 @@ func TestWriteIfChanged(t *testing.T) {
 func TestInstallDirsHonoursOverrides(t *testing.T) {
 	t.Setenv("COOLER_LCD_BINDIR", "/tmp/b")
 	t.Setenv("COOLER_LCD_RULEDIR", "/tmp/r")
+	t.Setenv("COOLER_LCD_UNITDIR", "/tmp/u")
 
-	binDir, ruleDir := installDirs()
+	binDir, ruleDir, unitDir := installDirs()
 	if binDir != "/tmp/b" || ruleDir != "/tmp/r" {
 		t.Errorf("installDirs() = %q, %q; want /tmp/b, /tmp/r", binDir, ruleDir)
+	}
+	if unitDir == "" {
+		t.Error("unitDir must not be empty")
 	}
 }
 
@@ -342,8 +352,8 @@ func fakeSystemctl(t *testing.T, active bool, calls *[]string) {
 // Starting an already-running service must say so, not "started".
 func TestServiceActionReportsActualState(t *testing.T) {
 	base := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", base)
-	unitDir := filepath.Join(base, "systemd", "user")
+	unitDir := filepath.Join(base, "systemd", "system")
+	t.Setenv("COOLER_LCD_UNITDIR", unitDir)
 	if err := os.MkdirAll(unitDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +388,7 @@ func TestServiceActionReportsActualState(t *testing.T) {
 	})
 
 	t.Run("unit missing", func(t *testing.T) {
-		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("COOLER_LCD_UNITDIR", t.TempDir())
 		cmd := &cobra.Command{}
 		cmd.SetOut(io.Discard)
 		err := serviceAction(cmd, "start")
@@ -393,7 +403,8 @@ func TestUninstallReportsNothingToRemove(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("COOLER_LCD_BINDIR", filepath.Join(dir, "bin"))
 	t.Setenv("COOLER_LCD_RULEDIR", filepath.Join(dir, "rules"))
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "cfg"))
+	t.Setenv("COOLER_LCD_UNITDIR", filepath.Join(dir, "unit"))
+	t.Setenv("COOLER_LCD_CONFIG", filepath.Join(dir, "cfg", "config.toml"))
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 
 	cmd := newUninstallCmd()

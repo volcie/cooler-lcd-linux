@@ -129,9 +129,7 @@ func serviceAction(cmd *cobra.Command, action string) error {
 		}
 	}
 
-	c := exec.Command("systemctl", "--user", action, serviceUnit)
-	c.Stdout, c.Stderr = nil, os.Stderr
-	if err := c.Run(); err != nil {
+	if err := runElevated("systemctl", action, serviceUnit); err != nil {
 		return fmt.Errorf("systemctl %s: %w", action, err)
 	}
 
@@ -164,14 +162,15 @@ func actionVerb(action string) string {
 	}
 }
 
-// systemctlQuiet reports whether a systemctl query succeeded.
+// systemctlQuiet reports whether a systemctl query succeeded. Used for
+// read-only queries, which do not need elevation.
 func systemctlQuiet(args ...string) bool {
-	return exec.Command("systemctl", append([]string{"--user"}, args...)...).Run() == nil
+	return exec.Command("systemctl", args...).Run() == nil
 }
 
 // recentLogs returns the tail of the unit's journal, or "" if unavailable.
 func recentLogs(n int) string {
-	out, err := exec.Command("journalctl", "--user", "-u", serviceUnit,
+	out, err := exec.Command("journalctl", "-u", serviceUnit,
 		"-n", fmt.Sprint(n), "--no-pager", "-o", "cat", "--quiet").Output()
 	if err != nil {
 		return ""
@@ -179,9 +178,9 @@ func recentLogs(n int) string {
 	return strings.TrimRight(string(out), "\n")
 }
 
-// unitInstalled reports whether the user service unit exists.
+// unitInstalled reports whether the system service unit exists.
 func unitInstalled() bool {
-	path := filepath.Join(xdgConfigHome(), "systemd", "user", unitFileName)
-	_, err := os.Stat(path)
+	_, _, unitDir := installDirs()
+	_, err := os.Stat(filepath.Join(unitDir, unitFileName))
 	return err == nil
 }

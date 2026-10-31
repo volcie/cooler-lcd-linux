@@ -32,11 +32,16 @@ Download a release binary, then let it install itself:
 sudo ./cooler-lcd-linux-amd64 install
 ```
 
-That copies itself to `/usr/local/bin/cooler-lcd`, installs the udev rule using
-**your** primary group, enables a systemd user service, and reports whether the
-panel is writable. Elevation is requested only for the two system-wide files; the
-user service is installed in your own session, because `systemctl --user` under
-sudo would target root's session instead.
+That copies itself to `/usr/local/bin/cooler-lcd`, creates the `cooler-lcd`
+group, installs the udev rule granting the panel to that group, enables a
+**system** service, and writes a default `/etc/cooler-lcd/config.toml`.
+
+It is a system service, not a user one, because the panel belongs to the machine:
+it should come up at boot and keep running at the login screen. A user service
+would stop at logout, and its `uaccess` ACL would disappear with the session.
+The service runs unprivileged via `DynamicUser=yes` with
+`SupplementaryGroups=cooler-lcd`, so only it can open the device — not every
+logged-in user.
 
 ```
 --no-service   skip the systemd user service
@@ -50,7 +55,7 @@ cooler-lcd uninstall          # asks before deleting your config, defaulting to 
 ```
 
 `uninstall` removes the udev rule, service and binary, then asks whether to
-delete `~/.config/cooler-lcd/config.toml`. Only real removals are reported; if
+delete `/etc/cooler-lcd/config.toml`. Only real removals are reported; if
 nothing was installed it says `nothing to remove` rather than claiming success.
 
 The config prompt defaults to **keep**, so a reinstall keeps your settings.
@@ -67,9 +72,11 @@ already exists.
 
 ```bash
 cooler-lcd status     # running? panel visible and writable? last log lines
-cooler-lcd restart    # after a config change
-cooler-lcd stop
+sudo cooler-lcd restart    # after a config change
+sudo cooler-lcd stop
 ```
+
+Writes need root because these are system units; `status` does not.
 
 These are shorthands for `cooler-lcd service <action>`; no `systemctl` needed.
 `status` folds together the three questions worth asking — is the unit up, can
@@ -82,13 +89,17 @@ and blanks it on Ctrl-C, which is useful for a one-off test.
 ## Configuration
 
 The service runs `cooler-lcd` with no arguments, so its behaviour comes from
-`~/.config/cooler-lcd/config.toml`:
+`/etc/cooler-lcd/config.toml`:
 
 ```bash
-cooler-lcd config init      # write a commented default file
-cooler-lcd config           # show what is loaded
-cooler-lcd restart          # apply changes
+sudo cooler-lcd config init   # write a commented default file
+cooler-lcd config             # show what is loaded
+sudo cooler-lcd restart       # apply changes
 ```
+
+`install` writes this file already. As root there is only one config; as a normal
+user, `~/.config/cooler-lcd/config.toml` is used when it exists, so `cooler-lcd
+print` and a foreground run work without sudo.
 
 ```toml
 unit    = "c"        # or "f"
@@ -135,7 +146,7 @@ Runtime:
 ```
 --device PATH         hidraw node (default: autodetect by USB ID)
 --refresh DURATION    frame interval (default 200ms, matching the vendor app)
---config PATH         config file (default ~/.config/cooler-lcd/config.toml)
+--config PATH         config file (default /etc/cooler-lcd/config.toml)
 --verbose             log every frame
 --log-json            structured JSON logs
 ```

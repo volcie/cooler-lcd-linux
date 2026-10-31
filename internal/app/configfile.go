@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+
 	"github.com/spf13/cobra"
+	"github.com/volcie/cooler-lcd-linux/internal/assets"
 )
 
 // Config mirrors the flags in a file, so the service can be configured without
@@ -40,21 +42,31 @@ type Config struct {
 	RAPL    string `toml:"rapl"`
 }
 
-// configPath returns the file to read, honouring --config and then
-// XDG_CONFIG_HOME.
+// configPath returns the file to read.
+//
+// The service is a system unit, so its configuration is system-wide. As root
+// there is exactly one answer. As a normal user, /etc is readable but not
+// writable, so a per-user file is also honoured: that is what makes
+// "cooler-lcd print" and a foreground run usable without sudo.
+//
+// Order: --config, then $COOLER_LCD_CONFIG, then, for a non-root user, the
+// per-user file if it exists, then the system file.
 func configPath(explicit string) (string, bool) {
 	if explicit != "" {
 		return explicit, true
 	}
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", false
-		}
-		base = filepath.Join(home, ".config")
+	if p := os.Getenv("COOLER_LCD_CONFIG"); p != "" {
+		return p, false
 	}
-	return filepath.Join(base, "cooler-lcd", "config.toml"), false
+	if os.Geteuid() != 0 {
+		if home, err := os.UserHomeDir(); err == nil {
+			userPath := filepath.Join(home, ".config", "cooler-lcd", "config.toml")
+			if _, err := os.Stat(userPath); err == nil {
+				return userPath, false
+			}
+		}
+	}
+	return assets.SystemConfigPath, false
 }
 
 // loadConfig reads the config file. A missing default file is not an error;

@@ -17,6 +17,14 @@ var ServiceUnit string
 
 // Placeholders replaced when rendering the templates above.
 const (
-	GroupToken = `GROUP="users"`
+	GroupToken = "@GROUP@"
 	BinToken   = "@BIN@"
 )
+
+// ServiceGroup is the dedicated group that owns the panel device and that the
+// system service runs with. A fixed name is required: the service runs with
+// DynamicUser=yes and cannot use a login user's group.
+const ServiceGroup = "cooler-lcd"
+
+// SystemConfigPath is where a system service reads its configuration.
+const SystemConfigPath = "/etc/cooler-lcd/config.toml"

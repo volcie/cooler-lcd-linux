@@ -1,8 +1,8 @@
 [Unit]
 Description=Cooler LCD panel sensor feed (5131:2007)
 Documentation=file:@BIN@
-After=graphical-session.target
-PartOf=graphical-session.target
+# No graphical-session dependency: the panel belongs to the machine and should
+# come up at boot, before anyone logs in.
 # A broken configuration is permanent: cooler-lcd exits 2 for those, and this
 # bound stops systemd retrying it forever.
 StartLimitIntervalSec=60
@@ -11,10 +11,24 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ExecStart=@BIN@
-# on-failure, not always: a clean exit (Ctrl-C, panel blanked) must stay stopped.
-# Transient problems such as an unplugged cooler exit 1 and are retried.
+# Runs unprivileged with a transient user, whose supplementary group is the one
+# the udev rule grants the hidraw node to.
+DynamicUser=yes
+SupplementaryGroups=@GROUP@
+# A broken config exits 2 immediately; an unplugged cooler exits 1 and is
+# retried. Neither should restart after a clean stop.
 Restart=on-failure
 RestartSec=3
 
+# Hardening. The service only reads sysfs/procfs and writes to one hidraw node.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+# libudev opens an AF_NETLINK socket when enumerating, so restricting the
+# address families to AF_UNIX would break device discovery.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

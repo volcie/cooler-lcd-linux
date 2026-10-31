@@ -83,7 +83,7 @@ The panel firmware draws its own digits; this streams sensor values to it every
 	// makes "cooler-lcd once --fahrenheit" an unknown-flag error.
 	pf := root.PersistentFlags()
 
-	pf.StringVar(&configFile, "config", "", "config file (default ~/.config/cooler-lcd/config.toml)")
+	pf.StringVar(&configFile, "config", "", "config file (default /etc/cooler-lcd/config.toml)")
 
 	// What the panel shows.
 	pf.Var(&opts.Unit, "unit", "temperature scale: c or f")
