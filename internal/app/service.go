@@ -130,6 +130,17 @@ func serviceAction(cmd *cobra.Command, action string) error {
 	}
 
 	if err := runElevated("systemctl", action, serviceUnit); err != nil {
+		// A unit that hit its start limit refuses to start until its failure
+		// state is cleared. That is a recoverable condition, not something to
+		// hand to the user as a raw systemctl error.
+		if action != "stop" && systemctlQuiet("is-failed", serviceUnit) {
+			if resetErr := runElevated("systemctl", "reset-failed", serviceUnit); resetErr == nil {
+				if retryErr := runElevated("systemctl", action, serviceUnit); retryErr == nil {
+					fmt.Fprintln(out, actionVerb(action)+" (after clearing a previous failure)")
+					return nil
+				}
+			}
+		}
 		return fmt.Errorf("systemctl %s: %w", action, err)
 	}
 

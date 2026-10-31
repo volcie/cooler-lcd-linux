@@ -19,12 +19,12 @@ import (
 // The embedded rule must carry the group placeholder the renderer replaces.
 // If someone edits the rule's GROUP=, install silently writes the wrong group.
 func TestRenderRuleSubstitutesGroup(t *testing.T) {
-	got := renderRule("cooler-lcd")
+	got := renderRule(assets.ServiceGroup)
 
 	if strings.Contains(got, assets.GroupToken) {
 		t.Errorf("placeholder %s still present", assets.GroupToken)
 	}
-	if !strings.Contains(got, `GROUP="cooler-lcd"`) {
+	if !strings.Contains(got, `GROUP="coolerlcd"`) {
 		t.Errorf("rendered rule missing the group:\n%s", got)
 	}
 	// Everything else must survive verbatim.
@@ -49,7 +49,7 @@ func TestRenderUnitSubstitutesBinary(t *testing.T) {
 	if !strings.Contains(got, "WantedBy=multi-user.target") {
 		t.Error("rendered unit lost the install target")
 	}
-	if !strings.Contains(got, "SupplementaryGroups=cooler-lcd") {
+	if !strings.Contains(got, "SupplementaryGroups=coolerlcd") {
 		t.Error("rendered unit lost the group")
 	}
 	if !strings.Contains(got, "DynamicUser=yes") {

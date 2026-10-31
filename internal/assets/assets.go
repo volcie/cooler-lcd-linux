@@ -24,7 +24,13 @@ const (
 // ServiceGroup is the dedicated group that owns the panel device and that the
 // system service runs with. A fixed name is required: the service runs with
 // DynamicUser=yes and cannot use a login user's group.
-const ServiceGroup = "cooler-lcd"
+//
+// It must NOT equal the unit name. DynamicUser=yes derives its transient user
+// name from the unit ("cooler-lcd"), and systemd refuses to set that user up
+// when a static group of the same name exists but no static user does, failing
+// with "User or group with specified name already exists" / 217/USER. Hence
+// "coolerlcd" rather than "cooler-lcd".
+const ServiceGroup = "coolerlcd"
 
 // SystemConfigPath is where a system service reads its configuration.
 const SystemConfigPath = "/etc/cooler-lcd/config.toml"

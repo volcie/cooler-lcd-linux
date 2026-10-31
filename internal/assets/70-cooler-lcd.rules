@@ -1,7 +1,7 @@
 # Cooler LCD panel (HID 5131:2007).
 #
 # The node is granted to a dedicated system group rather than to every logged-in
-# user, so only the service (which runs with SupplementaryGroups=cooler-lcd)
+# user, so only the service (which runs with SupplementaryGroups=coolerlcd)
 # can drive the panel.
 #
 # The file name matters. TAG+="uaccess" only marks the device; the ACL is
