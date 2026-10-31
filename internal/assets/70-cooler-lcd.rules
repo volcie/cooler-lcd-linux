@@ -1,0 +1,14 @@
+# Cooler LCD panel (HID 5131:2007).
+#
+# The file name matters. TAG+="uaccess" only marks the device; the ACL is
+# granted by the uaccess builtin, which runs from RUN{builtin}+ in
+# 73-seat-late.rules. A rule numbered above 73 still gets its tag applied, but
+# the step that consumes the tag has already run, so no ACL is granted. This
+# must therefore sort before 73 -- 70 keeps it after 50-udev-default.rules, so
+# these MODE/GROUP values win over that file's defaults.
+#
+# GROUP= is a backup for sessions where uaccess cannot resolve a seat (for
+# example a systemd user service running outside the seat context). "users" is
+# common but not universal; install substitutes the invoking user's primary
+# group, which is why it is spelled out here for hand-copied installs.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="5131", ATTRS{idProduct}=="2007", MODE="0660", GROUP="users", TAG+="uaccess"
