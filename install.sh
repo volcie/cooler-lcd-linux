@@ -26,7 +26,7 @@ case "${1:-}" in
 	;;
 --uninstall)
 	shift
-	exec "$(command -v cooler-lcd || echo /usr/local/bin/cooler-lcd)" uninstall "$@"
+	exec sudo "$bin" uninstall "$@"
 	;;
 *)
 	echo "building $bin"

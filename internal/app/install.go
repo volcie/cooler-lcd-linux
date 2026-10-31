@@ -15,6 +15,7 @@ import (
 
 	"github.com/volcie/cooler-lcd-linux/internal/assets"
 	"github.com/volcie/cooler-lcd-linux/internal/panel"
+	"github.com/volcie/cooler-lcd-linux/internal/version"
 )
 
 // Paths touched by install. Overridable so tests can run unprivileged.
@@ -114,7 +115,12 @@ func runInstall(cmd *cobra.Command, _ Options, noService, noStart bool) error {
 	// 1. Binary.
 	say("1/4  binary")
 	if self == binPath {
-		say("     already running from %s", binPath)
+		// Re-running the installed binary is allowed (it picks up config and
+		// rule changes), but the rendered rule and unit come from THIS build.
+		// If the installed copy is older than the repo, the group and other
+		// constants may differ, so say which version is doing the installing.
+		say("     running the installed binary (%s)", version.String())
+		say("     if you expected a newer one, rebuild and run dist/ instead")
 	} else if changed, err := installFile(self, binPath, 0o755); err != nil {
 		return fmt.Errorf("install binary: %w", err)
 	} else if changed {
